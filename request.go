@@ -1,12 +1,9 @@
 package http1
 
 import (
-	"bufio"
 	"bytes"
-	"fmt"
 	"io"
 	"net/url"
-	"strconv"
 
 	"github.com/pkg/errors"
 	"github.com/valyala/bytebufferpool"
@@ -51,78 +48,29 @@ func (r *RequestHeader) Read(input []byte) (int, error) {
 	return n, nil
 }
 
-func (h *RequestHeader) Write(wr *bufio.Writer) error {
-	host := h.Host
-	uri := h.URL.RequestURI()
-	if bytes.Equal(h.Method, byteConnect) && h.URL.Path == "" {
-		uri = b2s(host)
-		if h.URL.Opaque != "" {
-			uri = h.URL.Opaque
-		}
-	}
-	_, err := fmt.Fprintf(wr, "%s %s HTTP/1.1\r\n", h.Method, uri)
-	if err != nil {
-		return err
-	}
-
-	writeLine(wr, byteHost, host)
-
-	userAgent := defaultUserAgent
-	if len(h.GetHeader(HeaderUserAgent)) > 0 {
-		userAgent = h.GetHeader(HeaderUserAgent)
-	}
-	if len(userAgent) > 0 {
-		writeLine(wr, byteUserAgent, userAgent)
-	}
-
-	//@todo write Transfer
-
-	if h.ContentLength > 0 {
-		writeLine(wr, byteContentLength, s2b(strconv.Itoa(h.ContentLength)))
-	}
-
-	//write header
-	for k, v := range h.Headers {
-		writeLine(wr, s2b(k), v[0])
-	}
-
-	//end of header
-	wr.Write(byteCRLF)
-	return nil
-}
-
 var requestBodyPool bytebufferpool.Pool
 
 type Request struct {
-	RemoteAddr    string
-	RequestHeader RequestHeader
-	body          *bytebufferpool.ByteBuffer
-	MaxBodySize   int
-	userAgent     []byte
-
+	remoteAddr          string
+	header              RequestHeader
+	body                *bytebufferpool.ByteBuffer
+	MaxBodySize         int
+	userAgent           []byte
 	parseHeaderComplete bool
-	bodyStream          io.Reader
 }
 
-func (r *Request) Reset(RemoteAddr string) {
-	r.RequestHeader.Reset()
-	r.RemoteAddr = RemoteAddr
+func (r *Request) Reset(remoteAddr string) {
+	r.header.Reset()
+	r.remoteAddr = remoteAddr
 	r.MaxBodySize = 0
 	//r.body not need to reset See `(r *Request) parse` method
 	//r.body.Reset()
-
-	if r.bodyStream != nil {
-		if cl, ok := r.bodyStream.(io.Closer); ok {
-			cl.Close()
-		}
-		r.bodyStream = nil
-	}
 }
 
 func NewRequst(RemoteAddr string) *Request {
 	return &Request{
-		RemoteAddr: RemoteAddr,
-		RequestHeader: RequestHeader{
+		remoteAddr: RemoteAddr,
+		header: RequestHeader{
 			Request: *httparse.NewRequst(),
 		},
 	}
@@ -133,11 +81,11 @@ func (r *Request) Set(maxBodySize int) {
 }
 
 func (r *Request) ShouldClose() bool {
-	return r.RequestHeader.Close
+	return r.header.Close
 }
 
 func (r *Request) needClose() {
-	r.RequestHeader.Close = true
+	r.header.Close = true
 }
 
 func (r *Request) Body() []byte {
@@ -147,21 +95,29 @@ func (r *Request) Body() []byte {
 	return r.body.B
 }
 
+func (r *Request) Header() *RequestHeader {
+	return &r.header
+}
+
+func (r *Request) RemoteAddr() string {
+	return r.remoteAddr
+}
+
 func (r *Request) IsContinue() bool {
-	if v := r.RequestHeader.GetHeader(HeaderExpect); bytes.Equal(v, byte100Continue) {
+	if v := r.header.GetHeader(HeaderExpect); bytes.Equal(v, byte100Continue) {
 		return true
 	}
 	return false
 }
 
-func (r *Request) Parse(input Conn) (int, error) {
-	n, err := r.parse(input)
+func (r *Request) Parse(input Conn) error {
+	err := r.parse(input)
 	if err != nil {
 		if err != StatusPartial {
 			r.needClose()
 		}
 	}
-	return n, err
+	return err
 }
 
 func (r *Request) ContinueReadBody(input Conn) (n int, err error) {
@@ -172,22 +128,24 @@ func (r *Request) ContinueReadBody(input Conn) (n int, err error) {
 	bodyBuf.Reset()
 
 	switch {
-	case r.RequestHeader.ContentLength > 0:
-		if r.MaxBodySize > 0 && r.RequestHeader.ContentLength > r.MaxBodySize {
+	case r.header.ContentLength > 0:
+		if r.MaxBodySize > 0 && r.header.ContentLength > r.MaxBodySize {
 			err = ErrBodyTooLarge
+			return
 		}
-		if input.Buffered() < r.RequestHeader.ContentLength {
-			return StatusPartial
+		if input.Buffered() < r.header.ContentLength {
+			err = StatusPartial
+			return
 		}
-		bodyBuf.B, err = appendBodyFixedSize(input.Bytes(), bodyBuf.B, r.RequestHeader.ContentLength)
+		bodyBuf.B, err = appendBodyFixedSize(input.Bytes(), bodyBuf.B, r.header.ContentLength)
 		if err != nil {
-			err = err
+			return
 		}
-		n = r.RequestHeader.ContentLength
-	case r.RequestHeader.ContentLength == -1:
+		n = r.header.ContentLength
+	case r.header.ContentLength == -1:
 		bodyBuf.B, n, err = readChunked(input.Bytes(), r.MaxBodySize, bodyBuf.B)
 		if err != nil {
-			err = err
+			return
 		}
 	}
 	return
@@ -200,112 +158,44 @@ func (r *Request) BodyRelease() {
 	}
 }
 
-func (r *Request) parse(input Conn) (n int, err error) {
+func (r *Request) parse(input Conn) (err error) {
 	if !r.parseHeaderComplete {
-		b := input.Bytes()
-		n, err = r.RequestHeader.Read(b)
+		n, err := r.header.Read(input.Bytes())
 		if err != nil {
-			return 0, err
+			return err
 		}
-		input.Shift(len(b))
+		input.Shift(n)
 		r.parseHeaderComplete = true
 	}
 
-	r.RequestHeader.ContentLength = -2
+	r.header.ContentLength = -2
 
-	r.RequestHeader.TransferEncoding, err = fixTransferEncoding(r.RequestHeader.Headers)
+	r.header.TransferEncoding, err = fixTransferEncoding(r.header.Headers)
 	if err != nil {
-		return 0, err
+		return err
 	}
 
-	realLength, err := fixLength(false, 0, r.RequestHeader.Method,
-		r.RequestHeader.Headers, r.RequestHeader.TransferEncoding)
+	realLength, err := fixLength(false, 0, r.header.Method,
+		r.header.Headers, r.header.TransferEncoding)
 	if err != nil {
-		return 0, err
+		return err
 	}
 
-	r.RequestHeader.ContentLength = realLength
+	r.header.ContentLength = realLength
 
 	//'Expect: 100-continue' header need to feedback a response to clinet ,no do it here
 	if r.IsContinue() ||
-		r.RequestHeader.ContentLength == 0 ||
-		r.RequestHeader.ContentLength == -2 {
-		return 0, nil
+		r.header.ContentLength == 0 ||
+		r.header.ContentLength == -2 {
+		return nil
 	}
 
 	read, err := r.ContinueReadBody(input)
 	if err != nil {
-		return 0, err
+		return err
 	}
-	return n + read, err
-}
-
-//@todo
-func (r *Request) Write(wr *bufio.Writer) error {
-	if r.bodyStream != nil {
-		return r.writeBodyStream(wr)
-	}
-	hasBody := r.body != nil && len(r.body.B) > 0
-
-	if hasBody {
-		r.RequestHeader.ContentLength = len(r.body.B)
-	}
-
-	if err := r.RequestHeader.Write(wr); err != nil {
-		return errors.WithStack(err)
-	}
-	if hasBody {
-		wr.Write(r.body.B)
-	}
-	if err := wr.Flush(); err != nil {
-		return errors.WithStack(err)
-	}
-	return nil
-}
-
-func (r *Request) SetBodyStream(reader io.Reader, size int) {
-	r.bodyStream = reader
-	r.RequestHeader.ContentLength = size
-}
-
-func (r *Request) writeBodyStream(w *bufio.Writer) error {
-	var err error
-	contentLength := r.RequestHeader.ContentLength
-	if contentLength < 0 {
-		lr, ok := r.bodyStream.(*io.LimitedReader)
-		if ok {
-			if lr.N >= 0 {
-				contentLength = int(lr.N)
-				if int64(contentLength) != lr.N {
-					contentLength = -1
-				}
-				if contentLength >= 0 {
-					r.RequestHeader.ContentLength = contentLength
-				}
-			}
-		}
-	}
-	if contentLength >= 0 {
-		if err = r.RequestHeader.Write(w); err == nil {
-			_, err = bufCopy(w, r.bodyStream)
-			if err != nil {
-				return errors.WithStack(err)
-			}
-		}
-	} else {
-		r.RequestHeader.ContentLength = -1
-		if err = r.RequestHeader.Write(w); err == nil {
-			err = writeChunked(w, r.bodyStream)
-		}
-	}
-	if r.bodyStream == nil {
-		return nil
-	}
-	if cl, ok := r.bodyStream.(io.Closer); ok {
-		err = cl.Close()
-	}
-	r.bodyStream = nil
-	return err
+	input.Shift(read)
+	return
 }
 
 func readChunked(input []byte, maxBodySize int, dst []byte) ([]byte, int, error) {
