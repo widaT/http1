@@ -100,7 +100,8 @@ type Request struct {
 	MaxBodySize   int
 	userAgent     []byte
 
-	bodyStream io.Reader
+	parseHeaderComplete bool
+	bodyStream          io.Reader
 }
 
 func (r *Request) Reset(RemoteAddr string) {
@@ -153,15 +154,17 @@ func (r *Request) IsContinue() bool {
 	return false
 }
 
-func (r *Request) Parse(input []byte) (int, error) {
+func (r *Request) Parse(input Conn) (int, error) {
 	n, err := r.parse(input)
 	if err != nil {
-		r.needClose()
+		if err != StatusPartial {
+			r.needClose()
+		}
 	}
 	return n, err
 }
 
-func (r *Request) ContinueReadBody(input []byte) (n int, err error) {
+func (r *Request) ContinueReadBody(input Conn) (n int, err error) {
 	if r.body == nil {
 		r.body = requestBodyPool.Get()
 	}
@@ -173,13 +176,16 @@ func (r *Request) ContinueReadBody(input []byte) (n int, err error) {
 		if r.MaxBodySize > 0 && r.RequestHeader.ContentLength > r.MaxBodySize {
 			err = ErrBodyTooLarge
 		}
-		bodyBuf.B, err = appendBodyFixedSize(input, bodyBuf.B, r.RequestHeader.ContentLength)
+		if input.Buffered() < r.RequestHeader.ContentLength {
+			return StatusPartial
+		}
+		bodyBuf.B, err = appendBodyFixedSize(input.Bytes(), bodyBuf.B, r.RequestHeader.ContentLength)
 		if err != nil {
 			err = err
 		}
 		n = r.RequestHeader.ContentLength
 	case r.RequestHeader.ContentLength == -1:
-		bodyBuf.B, n, err = readChunked(input, r.MaxBodySize, bodyBuf.B)
+		bodyBuf.B, n, err = readChunked(input.Bytes(), r.MaxBodySize, bodyBuf.B)
 		if err != nil {
 			err = err
 		}
@@ -194,10 +200,15 @@ func (r *Request) BodyRelease() {
 	}
 }
 
-func (r *Request) parse(input []byte) (int, error) {
-	n, err := r.RequestHeader.Read(input)
-	if err != nil {
-		return 0, err
+func (r *Request) parse(input Conn) (n int, err error) {
+	if !r.parseHeaderComplete {
+		b := input.Bytes()
+		n, err = r.RequestHeader.Read(b)
+		if err != nil {
+			return 0, err
+		}
+		input.Shift(len(b))
+		r.parseHeaderComplete = true
 	}
 
 	r.RequestHeader.ContentLength = -2
@@ -222,7 +233,7 @@ func (r *Request) parse(input []byte) (int, error) {
 		return 0, nil
 	}
 
-	read, err := r.ContinueReadBody(input[:n])
+	read, err := r.ContinueReadBody(input)
 	if err != nil {
 		return 0, err
 	}
@@ -329,7 +340,7 @@ func appendBodyFixedSize(input []byte, dst []byte, n int) ([]byte, error) {
 	}
 
 	if len(input) < n {
-		return nil, errors.New("Pending")
+		return nil, StatusPartial
 	}
 
 	offset := len(dst)
