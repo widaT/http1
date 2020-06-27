@@ -51,25 +51,22 @@ func (r *RequestHeader) Read(input []byte) (int, error) {
 var requestBodyPool bytebufferpool.Pool
 
 type Request struct {
-	remoteAddr          string
 	header              RequestHeader
 	body                *bytebufferpool.ByteBuffer
 	MaxBodySize         int
-	userAgent           []byte
 	parseHeaderComplete bool
 }
 
-func (r *Request) Reset(remoteAddr string) {
+func (r *Request) Reset() {
 	r.header.Reset()
-	r.remoteAddr = remoteAddr
 	r.MaxBodySize = 0
+	r.parseHeaderComplete = false
 	//r.body not need to reset See `(r *Request) parse` method
 	//r.body.Reset()
 }
 
 func NewRequst(RemoteAddr string) *Request {
 	return &Request{
-		remoteAddr: RemoteAddr,
 		header: RequestHeader{
 			Request: *httparse.NewRequst(),
 		},
@@ -99,10 +96,6 @@ func (r *Request) Header() *RequestHeader {
 	return &r.header
 }
 
-func (r *Request) RemoteAddr() string {
-	return r.remoteAddr
-}
-
 func (r *Request) IsContinue() bool {
 	if v := r.header.GetHeader(HeaderExpect); bytes.Equal(v, byte100Continue) {
 		return true
@@ -120,7 +113,7 @@ func (r *Request) Parse(input Conn) error {
 	return err
 }
 
-func (r *Request) ContinueReadBody(input Conn) (n int, err error) {
+func (r *Request) ContinueReadBody(input Conn) (err error) {
 	if r.body == nil {
 		r.body = requestBodyPool.Get()
 	}
@@ -141,9 +134,8 @@ func (r *Request) ContinueReadBody(input Conn) (n int, err error) {
 		if err != nil {
 			return
 		}
-		n = r.header.ContentLength
 	case r.header.ContentLength == -1:
-		bodyBuf.B, n, err = readChunked(input.Bytes(), r.MaxBodySize, bodyBuf.B)
+		bodyBuf.B, err = readChunked(input, r.MaxBodySize, bodyBuf.B)
 		if err != nil {
 			return
 		}
@@ -190,36 +182,35 @@ func (r *Request) parse(input Conn) (err error) {
 		return nil
 	}
 
-	read, err := r.ContinueReadBody(input)
+	err = r.ContinueReadBody(input)
 	if err != nil {
 		return err
 	}
-	input.Shift(read)
 	return
 }
 
-func readChunked(input []byte, maxBodySize int, dst []byte) ([]byte, int, error) {
+func readChunked(input Conn, maxBodySize int, dst []byte) ([]byte, error) {
 	crlfLen := 2
-	read := 0
+	//read := 0
 	for {
-		chunkSize, n, err := parseChunkSize(input)
+		chunkSize, n, err := parseChunkSize(input.Bytes())
 		if err != nil {
-			return dst, 0, err
+			return dst, err
 		}
-		read += n
+		input.Shift(n)
 		if maxBodySize > 0 && len(dst)+chunkSize > maxBodySize {
-			return dst, 0, ErrBodyTooLarge
+			return dst, ErrBodyTooLarge
 		}
-		dst, err = appendBodyFixedSize(input[read:], dst, chunkSize+crlfLen)
+		dst, err = appendBodyFixedSize(input.Bytes(), dst, chunkSize+crlfLen)
 		if err != nil {
-			return dst, 0, err
+			return dst, err
 		}
 		if !bytes.Equal(dst[len(dst)-crlfLen:], byteCRLF) {
-			return dst, 0, errors.Errorf("cannot find crlf at the end of chunk")
+			return dst, errors.Errorf("cannot find crlf at the end of chunk")
 		}
 		dst = dst[:len(dst)-crlfLen]
 		if chunkSize == 0 {
-			return dst, read, nil
+			return dst, nil
 		}
 	}
 }
@@ -263,7 +254,7 @@ func parseChunkSize(input []byte) (int, int, error) {
 	var line []byte
 	line, n, err := readChunkLine(input)
 	if err != nil {
-		return 0, 0, errors.WithStack(err)
+		return 0, 0, err
 	}
 	len, err := parseHexUint(line)
 	if err != nil {
@@ -299,7 +290,7 @@ func parseHexUint(v []byte) (n int, err error) {
 func readChunkLine(input []byte) ([]byte, int, error) {
 	p := bytes.Index(input, []byte{'\n'})
 	if p == -1 {
-		return nil, 0, ErrLineTooLong
+		return nil, 0, StatusPartial
 	}
 	if p+1 >= maxLineLength {
 		return nil, 0, ErrLineTooLong

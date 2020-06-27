@@ -10,3 +10,5 @@ github.com/widaT/httparse v0.0.0-20200624095608-508fe15aff31 h1:gydVRJkpeE/mjBH1
 github.com/widaT/httparse v0.0.0-20200624095608-508fe15aff31/go.mod h1:GotUHPfGSzw9pFMkfMd80dOOETmnn99t1LaqNJIVlps=
 github.com/widaT/httparse v0.0.0-20200624135641-fded79c606d4 h1:/LmLityYm3YCnzphXhEytfThV9+4vpjpnudSVLeixgk=
 github.com/widaT/httparse v0.0.0-20200624135641-fded79c606d4/go.mod h1:GotUHPfGSzw9pFMkfMd80dOOETmnn99t1LaqNJIVlps=
+github.com/widaT/httparse v0.0.0-20200626234402-5f7b7cd6e37c h1:XZAk/INlr7i4A49wx1eJQmSwulvpcT+wgrBctlpMCV8=
+github.com/widaT/httparse v0.0.0-20200626234402-5f7b7cd6e37c/go.mod h1:GotUHPfGSzw9pFMkfMd80dOOETmnn99t1LaqNJIVlps=
