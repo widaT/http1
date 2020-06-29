@@ -11,7 +11,7 @@ import (
 type Context struct {
 	conn            Conn
 	s               *Server
-	continueReqSend bool
+	continueReqSend bool //是否发送了 100 continue，由于是分段式处理，需要记住这个状态
 	req             *Request
 	resp            *Response
 	connRequestNum  uint64
@@ -37,6 +37,14 @@ func (ctx *Context) Reset(conn Conn) {
 	ctx.writer.Reset(conn)
 }
 
+//CleanHttpTransation 擦除request和response的信息，
+func (ctx *Context) CleanHttpTransation(conn Conn) {
+	ctx.resp.Reset()
+	ctx.req.Reset()
+	ctx.writer.Reset(conn)
+	ctx.continueReqSend = false
+}
+
 func (ctx *Context) RemoteAddr() net.Addr {
 	return ctx.conn.RemoteAddr()
 }
@@ -52,6 +60,9 @@ func (ctx *Context) Response() *Response {
 func (ctx *Context) ServeHttp() error {
 	if !ctx.req.parseHeaderComplete {
 		if err := ctx.req.parse(ctx.conn); err != nil {
+			if err == StatusPartial {
+				return nil
+			}
 			return err
 		}
 	}
@@ -67,14 +78,18 @@ func (ctx *Context) ServeHttp() error {
 	ctx.resp.Write(ctx.writer)
 	if ctx.conn.Buffered() == 0 || ctx.req.ShouldClose() {
 		err := ctx.writer.Flush()
+		//fmt.Println(ctx.writer.Buffered())
 		if err != nil {
+			//	ReleaseContext(ctx)
 			return errors.WithStack(err)
 		}
 	}
 	if ctx.req.ShouldClose() || (ctx.s.MaxServeTimesPerConn > 0 && ctx.s.MaxServeTimesPerConn > ctx.connRequestNum) {
+		//ReleaseContext(ctx)
 		return errors.New("should  close")
 	}
 	ctx.connRequestNum++
+	ctx.CleanHttpTransation(ctx.conn)
 	return nil
 }
 
