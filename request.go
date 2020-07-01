@@ -130,7 +130,13 @@ func (r *Request) ContinueReadBody(input Conn) (err error) {
 			err = StatusPartial
 			return
 		}
-		bodyBuf.B, err = appendBodyFixedSize(input.Bytes(), bodyBuf.B, r.header.ContentLength)
+
+		buf, err0 := input.Bytes()
+		if err0 != nil {
+			return err0
+		}
+
+		bodyBuf.B, err = appendBodyFixedSize(buf, bodyBuf.B, r.header.ContentLength)
 		if err != nil {
 			return
 		}
@@ -152,7 +158,12 @@ func (r *Request) BodyRelease() {
 
 func (r *Request) parse(input Conn) (err error) {
 	if !r.parseHeaderComplete {
-		n, err := r.header.Read(input.Bytes())
+
+		buf, err0 := input.Bytes()
+		if err0 != nil {
+			return err0
+		}
+		n, err := r.header.Read(buf)
 		if err != nil {
 			return err
 		}
@@ -193,7 +204,11 @@ func readChunked(input Conn, maxBodySize int, dst []byte) ([]byte, error) {
 	crlfLen := 2
 	//read := 0
 	for {
-		chunkSize, n, err := parseChunkSize(input.Bytes())
+		buf, err := input.Bytes()
+		if err != nil {
+			return nil, err
+		}
+		chunkSize, n, err := parseChunkSize(buf)
 		if err != nil {
 			return dst, err
 		}
@@ -201,7 +216,8 @@ func readChunked(input Conn, maxBodySize int, dst []byte) ([]byte, error) {
 		if maxBodySize > 0 && len(dst)+chunkSize > maxBodySize {
 			return dst, ErrBodyTooLarge
 		}
-		dst, err = appendBodyFixedSize(input.Bytes(), dst, chunkSize+crlfLen)
+		buf, _ = input.Bytes()
+		dst, err = appendBodyFixedSize(buf, dst, chunkSize+crlfLen)
 		if err != nil {
 			return dst, err
 		}
